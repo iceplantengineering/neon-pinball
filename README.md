@@ -15,3 +15,6 @@
 - 残機3 / コンボ倍率 / ハイスコアは localStorage
 - WebAudio 合成によるSFX 12種＋BGMループ
 - 生成: claude-glm (GLM-5.4) — 検証は headless Chromium + CDP で実キー入力
+
+## 公開
+- https://neon-pinball-263.netlify.app/
