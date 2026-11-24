@@ -215,6 +215,12 @@ const BUMPERS = [
 ];
 const BUMPER_KICK = 900;
 
+// フリッパー軸の埋め木（軸と外周壁の間に球が挟まるのを防ぐ・得点なし）
+const POSTS = [
+  { x: 160, y: 645, r: 11 },
+  { x: 320, y: 645, r: 11 }
+];
+
 // ドロップターゲット 5個
 const targets = [180, 210, 240, 270, 300].map(x => ({ x, up: true, flash: 0 }));
 
@@ -518,6 +524,16 @@ function collide() {
     const hit = collideCapsule(s.ax, s.ay, s.bx, s.by, FLIP_R, REST_FLIP, null, f);
     if (hit && Math.abs(f.omega) > 8 && -hit.vn > 250) burst(hit.qx, hit.qy, 4, COLORS.yellow, 220, hit.nx, hit.ny);
   }
+  for (const p of POSTS) {
+    const dx = ball.x - p.x, dy = ball.y - p.y, R = BALL_R + p.r;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < R * R) {
+      const d = Math.sqrt(d2) || 1, nx = dx / d, ny = dy / d;
+      ball.x = p.x + nx * R; ball.y = p.y + ny * R;
+      const vn = ball.vx * nx + ball.vy * ny;
+      if (vn < 0) { ball.vx -= 1.4 * vn * nx; ball.vy -= 1.4 * vn * ny; }
+    }
+  }
   for (const b of BUMPERS) collideBumper(b);
   collideTargets();
   collideSpinner();
@@ -532,6 +548,7 @@ function spawnBall() {
   ball.vx = 0; ball.vy = 0; ball.inPlay = true; ball.trail.length = 0;
   game.mode = 'ready'; game.charging = false; game.charge = 0;
   game.plungerY = PLUNGER_TIP; game.plungerV = 0;
+  resetStuckWatch();
 }
 function loseBall() {
   ball.inPlay = false; game.mode = 'lost'; game.charging = false; game.charge = 0;
@@ -610,6 +627,58 @@ function updateTimers(dt) {
   } else { shake.x = 0; shake.y = 0; }
 }
 
+// ---- スタック検知（狭所で固まる→ナッジ→3回目でセーフリスポーン） ----
+const stuckWatch = { x: 0, y: 0, t: 0, n: 0, cool: 0 };
+function resetStuckWatch() { stuckWatch.t = 0; stuckWatch.n = 0; stuckWatch.cool = 0; stuckWatch.x = ball.x; stuckWatch.y = ball.y; }
+// 球がフリッパーに乗っている（=意図的なクレードル）かどうか
+function distToSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}
+function onFlipper() {
+  for (const f of flippers) {
+    const s = flipperSeg(f);
+    if (distToSeg(ball.x, ball.y, s.ax, s.ay, s.bx, s.by) < BALL_R + FLIP_R + 3) return true;
+  }
+  return false;
+}
+function nudgeBall() {
+  const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.0;
+  const pw = 430;
+  ball.vx = Math.cos(a) * pw + ball.vx * 0.3;
+  ball.vy = Math.sin(a) * pw;
+  ball.y -= 2;
+  addShake(5);
+  burst(ball.x, ball.y, 12, COLORS.white, 260, 0, -1);
+  addText(ball.x, ball.y - 24, 'NUDGE', COLORS.orange, 13, 0.7);
+  sfxSling();
+}
+function softRespawn() {
+  const w = ball.x;
+  ball.x = w < W / 2 ? 200 : 280; ball.y = 190;
+  ball.vx = (Math.random() * 2 - 1) * 90; ball.vy = 90;
+  ball.trail.length = 0;
+  addText(ball.x, ball.y - 22, 'BALL SAVE', COLORS.green, 15, 1.1);
+  burst(ball.x, ball.y, 18, COLORS.green, 260);
+  sfxBankReset();
+}
+function updateStuckWatch(dt) {
+  if (game.mode !== 'live' || !ball.inPlay) { resetStuckWatch(); return; }
+  if (stuckWatch.cool > 0) { stuckWatch.cool -= dt; return; }
+  const moved = Math.hypot(ball.x - stuckWatch.x, ball.y - stuckWatch.y);
+  if (moved > 18) { stuckWatch.x = ball.x; stuckWatch.y = ball.y; stuckWatch.t = 0; return; }
+  if (ball.speed > 55) { stuckWatch.t = 0; return; }
+  // フリッパーに乗せている（クレードル）間は「詰まり」とみなさない
+  if (onFlipper()) { stuckWatch.t = Math.max(0, stuckWatch.t - dt * 2); return; }
+  stuckWatch.t += dt;
+  if (stuckWatch.t > 2.2) {
+    stuckWatch.t = 0; stuckWatch.n++; stuckWatch.cool = 1.0;
+    softRespawn();               // プレー再開位置（台の上）へ戻す。残機は減らさない
+  }
+}
+
 function physicsStep(dt) {
   game.time += dt;
   updateFlippers(dt);
@@ -627,6 +696,7 @@ function physicsStep(dt) {
     collide();
   }
   ball.speed = clampSpeed();
+  updateStuckWatch(dt);
   ball.trail.push(ball.x, ball.y);
   if (ball.trail.length > 48) ball.trail.splice(0, ball.trail.length - 48);
   // レーンに戻った → 再発射待ち
@@ -896,6 +966,19 @@ function drawPlunger() {
   rr(ctx, LANE_X0 + 2, tip - 3, LANE_X1 - LANE_X0 - 4, 6, 2); ctx.fill(); glowOff(ctx);
 }
 
+function drawPosts() {
+  for (const p of POSTS) {
+    ctx.fillStyle = 'rgba(8,12,26,0.95)';
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    glowOn(ctx, COLORS.cyan, 10);
+    ctx.strokeStyle = 'rgba(25,230,255,0.75)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.stroke();
+    glowOff(ctx);
+    ctx.fillStyle = 'rgba(25,230,255,0.5)';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
 function drawFlippers() {
   for (const f of flippers) {
     const s = flipperSeg(f), bw = 8.5, tw = 5.5;
@@ -980,6 +1063,7 @@ function render() {
   drawSpinner();
   drawGauge();
   drawPlunger();
+  drawPosts();
   drawFlippers();
   drawBall();
   drawParticles();
@@ -1271,6 +1355,8 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 150));
 requestAnimationFrame(frame);
 // ============================================================
+// QA用フック（#debug 付きで開いた時だけ内部状態を公開。通常プレイには影響なし）
+if (location.hash === '#debug') window.__pin = { ball, game, flippers, POSTS, stuckWatch, nudgeBall, softRespawn };
 })();
 </script>
 </body>
